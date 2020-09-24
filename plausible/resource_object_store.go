@@ -51,8 +51,9 @@ func resourceObjectStore() *schema.Resource {
 			},
 
 			"key_type": {
-				Type:    schema.TypeString,
-				Default: "simple",
+				Type:     schema.TypeString,
+				Optional: true,
+				Default:  "simple",
 				ValidateFunc: func(val interface{}, key string) (warns []string, errs []error) {
 					v := strings.ToLower(val.(string))
 					if v != "simple" && v != "composite" {
