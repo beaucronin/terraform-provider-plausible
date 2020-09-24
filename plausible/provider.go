@@ -19,17 +19,13 @@ func Provider() *schema.Provider {
 					"are us-east-1, us-west-2, etc.",
 				InputDefault: "us-west-2",
 			},
-			// "account_id": {
-
-			// }
 		},
 		ResourcesMap: map[string]*schema.Resource{
-			"plausible_function":     resourceFunction(),
-			"plausible_http_api":     resourceHttpApi(),
-			"plausible_object_store": resourceObjectStore(),
+			"plausible_function":       resourceFunction(),
+			"plausible_http_api":       resourceHttpApi(),
+			"plausible_object_store":   resourceObjectStore(),
+			"plausible_keyvalue_store": resourceKeyValueStore(),
 			// "plausible_stream_analytics": resourceStreamAnalytics(),
-			// "plausible_keyvalue_store":   resourceKeyValueStore(),
-			// "plausible_object_store":     resourceObjectStore(),
 			// "plausible_file_store": resourceFileStore(),
 			// "plausible_publisher":        resourcePublisher(),
 			// "plausible_eventbus":         resourceEventBus(),
