@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/lambda"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/sns"
+	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -109,6 +110,10 @@ func resourceFunction() *schema.Resource {
 					},
 				},
 			},
+			"api_route_trigger_enabled": &schema.Schema{
+				Type:     schema.TypeBool,
+				Computed: true,
+			},
 
 			"schedule_trigger": &schema.Schema{
 				Type:     schema.TypeList,
@@ -118,6 +123,16 @@ func resourceFunction() *schema.Resource {
 					Schema: map[string]*schema.Schema{
 						"cron": &schema.Schema{
 							Type:     schema.TypeString,
+							Required: true,
+						},
+						"schedule_id": &schema.Schema{
+							Type:     schema.TypeString,
+							Computed: true,
+							Optional: true,
+						},
+						"schedule_name": &schema.Schema{
+							Type:     schema.TypeString,
+							Computed: true,
 							Optional: true,
 						},
 					},
@@ -125,18 +140,6 @@ func resourceFunction() *schema.Resource {
 			},
 			"schedule_trigger_enabled": &schema.Schema{
 				Type:     schema.TypeBool,
-				Computed: true,
-			},
-			"schedule_id": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"schedule_name": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"schedule_target_id": &schema.Schema{
-				Type:     schema.TypeString,
 				Computed: true,
 			},
 
@@ -150,15 +153,21 @@ func resourceFunction() *schema.Resource {
 							Type:     schema.TypeString,
 							Required: true,
 						},
+						"subscription_id": &schema.Schema{
+							Type:     schema.TypeString,
+							Computed: true,
+							Optional: true,
+						},
+						"queue_id": &schema.Schema{
+							Type:     schema.TypeString,
+							Computed: true,
+							Optional: true,
+						},
 					},
 				},
 			},
 			"subscription_trigger_enabled": &schema.Schema{
 				Type:     schema.TypeBool,
-				Computed: true,
-			},
-			"subscription_id": &schema.Schema{
-				Type:     schema.TypeString,
 				Computed: true,
 			},
 
@@ -248,6 +257,7 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 		// A schedule trigger requires a CloudWatch rule that contains the schedule,
 		// a Lambda permission that allows this rule to invoke the Lambda, and
 		// an Event Target that tells the rule to invoke the Lambda
+		triggerInfo := v.([]*schema.ResourceData)[0]
 
 		// Create CloudWatch event rule
 		cwconn := m.(*AWSClient).cloudwatcheventsconn
@@ -255,15 +265,15 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 		ruleInput := events.PutRuleInput{
 			Name: aws.String(ruleName),
 		}
-		if c, ok := v.([]*schema.ResourceData)[0].GetOk("cron"); ok {
+		if c, ok := triggerInfo.GetOk("cron"); ok {
 			ruleInput.ScheduleExpression = aws.String(c.(string))
 		}
 
 		ruleInput.State = aws.String("true")
 		ruleOut, err := cwconn.PutRule(&ruleInput)
 		d.Set("schedule_trigger_enabled", true)
-		d.Set("schedule_id", ruleOut.RuleArn)
-		d.Set("schedule_name", ruleName)
+		triggerInfo.Set("schedule_id", ruleOut.RuleArn)
+		triggerInfo.Set("schedule_name", ruleName)
 
 		// Create Lambda permission
 		input := lambda.AddPermissionInput{
@@ -280,8 +290,6 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 		}
 
 		// Create Cloudwatch event target
-		targetId := resource.UniqueId()
-		d.Set("schedule_target_id", targetId)
 		targetInput := &events.PutTargetsInput{
 			Rule: aws.String(ruleName),
 			Targets: []*events.Target{
@@ -299,11 +307,13 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 	}
 
 	if v, ok := d.GetOk("api_route_trigger"); ok {
+		// An API Route trigger requires a Lambda permission, and an integration on an
+		// existing API method to trigger the Lambda
 		apiconn := m.(*AWSClient).apigatewayconn
-		routeTriggerInfo := v.([]interface{})[0].(map[string]interface{}) //v.([]*schema.ResourceData)[0]
-		var api_id = routeTriggerInfo["api_id"].(string)
-		var method = routeTriggerInfo["method"].(string)
-		var route = routeTriggerInfo["route"].(string)
+		triggerInfo := v.([]*schema.ResourceData)[0]
+		var api_id = triggerInfo.Get("api_id").(string)
+		var method = triggerInfo.Get("method").(string)
+		var route = triggerInfo.Get("route").(string)
 		region := m.(*AWSClient).region
 
 		// Create Lambda permission
@@ -321,7 +331,7 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 			return diag.Errorf("Error adding lambda permission %+v", err)
 		}
 
-		// Create API method integration
+		// Search list of resources to find the correct one (by path)
 		r, err := apiconn.GetResources(&apigateway.GetResourcesInput{
 			Limit:     aws.Int64(int64(500)),
 			RestApiId: aws.String(api_id),
@@ -341,6 +351,7 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 			return diag.Errorf("No resource found in api for route %s", route)
 		}
 
+		// Create API method integration
 		// https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-custom-integrations.html
 		// https://docs.aws.amazon.com/apigateway/api-reference/link-relation/integration-put/
 		uri := fmt.Sprintf("arn:aws:apigateway:%s:lambda:path/2015-03-31/functions/arn:aws:lambda:%s:%s:function:%s/invocations", region, region, accountId, functionName, route)
@@ -356,27 +367,62 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 		if err != nil {
 			return diag.Errorf("Error creating API Gateway Integration: %+v", err)
 		}
-
-		// d.SetId(fmt.Sprintf("agi-%s-%s-%s", d.Get("rest_api_id").(string), d.Get("resource_id").(string), d.Get("http_method").(string)))
-
+		d.Set("api_route_trigger_enabled", true)
 	}
 
 	if v, ok := d.GetOk("subscription_trigger"); ok {
-		// Create topic subscription
+		// To trigger a Lambda from a subscription, we create an SQS queue to subscribe to the
+		// existing SNS topic, and trigger the Lambda from that queue. This provides shock
+		// absorption and prevents message loss in the case of throughput that exceeds
+		// concurrency limits
+		triggerInfo := v.([]*schema.ResourceData)[0]
+		sqsconn := m.(*AWSClient).sqsconn
+
+		// Create the SQS queue and retrieve its Arn
+		var queueOutput, err = sqsconn.CreateQueue(&sqs.CreateQueueInput{
+			QueueName: aws.String(resource.UniqueId()),
+		})
+		if err != nil {
+			return diag.Errorf("Creating SQS queue failed: %s", err)
+		}
+
+		attNames := []*string{aws.String("QueueArn")}
+		queueAttributes, err := sqsconn.GetQueueAttributes(&sqs.GetQueueAttributesInput{
+			QueueUrl:       queueOutput.QueueUrl,
+			AttributeNames: attNames,
+		})
+		if err != nil {
+			return diag.Errorf("Getting queue attributes failed: %s", err)
+		}
+
+		// Create topic subscription for SQS queue
 		snsconn := m.(*AWSClient).snsconn
 
 		req := &sns.SubscribeInput{
-			Protocol: aws.String("lambda"),
-			Endpoint: aws.String(d.Id()),
-			TopicArn: aws.String(v.([]*schema.ResourceData)[0].Get("publisher_id").(string)),
+			Protocol: aws.String("sqs"),
+			Endpoint: queueAttributes.Attributes["QueueArn"],
+			TopicArn: aws.String(triggerInfo.Get("publisher_id").(string)),
 		}
 		output, err := snsconn.Subscribe(req)
 		if err != nil {
 			return diag.Errorf("Creating SNS subscription failed: %s", err)
 		}
 
+		// Create lambda event source mapping
+		params := &lambda.CreateEventSourceMappingInput{
+			EventSourceArn: queueAttributes.Attributes["QueueArn"],
+			FunctionName:   aws.String(functionName),
+			Enabled:        aws.Bool(true),
+		}
+		_, err = conn.CreateEventSourceMapping(params)
+		if err != nil {
+			return diag.Errorf("Creating Lambda event source mapping: %s", err)
+		}
+
+		triggerInfo.Set("queue_id", queueAttributes.Attributes["QueueArn"])
+		triggerInfo.Set("subscription_id", output.SubscriptionArn)
+
 		d.Set("subscription_trigger_enabled", true)
-		d.Set("subscription_id", output.SubscriptionArn)
 	} else {
 		d.Set("subscription_trigger_enabled", false)
 	}
@@ -441,7 +487,7 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 		d.Set("datastore_trigger_enabled", false)
 	}
 
-	return nil
+	return resourceFunctionRead(ctx, d, m)
 }
 
 func resourceFunctionRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
