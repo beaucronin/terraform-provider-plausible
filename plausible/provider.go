@@ -19,6 +19,11 @@ func Provider() *schema.Provider {
 					"are us-east-1, us-west-2, etc.",
 				InputDefault: "us-west-2",
 			},
+			"app_name": {
+				Type:        schema.TypeString,
+				Required:    true,
+				Description: "The name of this app, which may be used to uniquely identify resources",
+			},
 		},
 		ResourcesMap: map[string]*schema.Resource{
 			"plausible_function":       resourceFunction(),
@@ -49,6 +54,7 @@ func Provider() *schema.Provider {
 func providerConfigure(d *schema.ResourceData, terraformVersion string) (interface{}, error) {
 	config := Config{
 		Region:           d.Get("region").(string),
+		AppName:          d.Get("app_name").(string),
 		terraformVersion: terraformVersion,
 	}
 

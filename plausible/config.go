@@ -54,6 +54,7 @@ import (
 )
 
 type Config struct {
+	AppName       string
 	AccessKey     string
 	SecretKey     string
 	CredsFilename string
