@@ -1,11 +1,17 @@
 package plausible
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	awsCredentials "github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/endpoints"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/apigateway"
 	"github.com/aws/aws-sdk-go/service/apigatewayv2"
 	"github.com/aws/aws-sdk-go/service/athena"
@@ -51,20 +57,21 @@ import (
 	"github.com/aws/aws-sdk-go/service/sts"
 	"github.com/aws/aws-sdk-go/service/xray"
 	awsbase "github.com/hashicorp/aws-sdk-go-base"
+	"github.com/hashicorp/go-cleanhttp"
+	"github.com/mitchellh/go-homedir"
 )
 
 type Config struct {
-	AppName       string
-	AccessKey     string
-	SecretKey     string
-	CredsFilename string
-	Profile       string
-	Token         string
-	Partition     string
-	AccountId     string
-	Region        string
-	MaxRetries    int
-
+	AppName                     string
+	AccessKey                   string
+	SecretKey                   string
+	CredsFilename               string
+	Profile                     string
+	Token                       string
+	Partition                   string
+	AccountId                   string
+	Region                      string
+	MaxRetries                  int
 	AssumeRoleARN               string
 	AssumeRoleDurationSeconds   int
 	AssumeRoleExternalID        string
@@ -73,24 +80,26 @@ type Config struct {
 	AssumeRoleSessionName       string
 	AssumeRoleTags              map[string]string
 	AssumeRoleTransitiveTagKeys []string
-
-	AllowedAccountIds   []string
-	ForbiddenAccountIds []string
-
-	Endpoints map[string]string
-	Insecure  bool
-
-	SkipCredsValidation     bool
-	SkipGetEC2Platforms     bool
-	SkipRegionValidation    bool
-	SkipRequestingAccountId bool
-	SkipMetadataApiCheck    bool
-	S3ForcePathStyle        bool
-
-	terraformVersion string
+	AllowedAccountIds           []string
+	ForbiddenAccountIds         []string
+	Endpoints                   map[string]string
+	Insecure                    bool
+	SkipCredsValidation         bool
+	SkipGetEC2Platforms         bool
+	SkipRegionValidation        bool
+	SkipRequestingAccountId     bool
+	SkipMetadataApiCheck        bool
+	S3ForcePathStyle            bool
+	terraformVersion            string
+	CallerDocumentationURL      string
+	CallerName                  string
+	DebugLogging                bool
+	IamEndpoint                 string
+	StsEndpoint                 string
 }
 
 type AWSClient struct {
+	appname                   string
 	apigatewayconn            *apigateway.APIGateway
 	apigatewayv2conn          *apigatewayv2.ApiGatewayV2
 	athenaconn                *athena.Athena
@@ -166,52 +175,9 @@ func (c *Config) Client() (interface{}, error) {
 		}
 	}
 
-	awsbaseConfig := &awsbase.Config{
-		AccessKey:                   c.AccessKey,
-		AssumeRoleARN:               c.AssumeRoleARN,
-		AssumeRoleDurationSeconds:   c.AssumeRoleDurationSeconds,
-		AssumeRoleExternalID:        c.AssumeRoleExternalID,
-		AssumeRolePolicy:            c.AssumeRolePolicy,
-		AssumeRolePolicyARNs:        c.AssumeRolePolicyARNs,
-		AssumeRoleSessionName:       c.AssumeRoleSessionName,
-		AssumeRoleTags:              c.AssumeRoleTags,
-		AssumeRoleTransitiveTagKeys: c.AssumeRoleTransitiveTagKeys,
-		CallerName:                  "Plausible|AWS Provider",
-		CredsFilename:               c.CredsFilename,
-		DebugLogging:                true, //logging.IsDebugOrHigher(),
-		IamEndpoint:                 c.Endpoints["iam"],
-		Insecure:                    c.Insecure,
-		MaxRetries:                  c.MaxRetries,
-		// Partition:                   c.Partition,
-		Profile:                 c.Profile,
-		Region:                  c.Region,
-		SecretKey:               c.SecretKey,
-		SkipCredsValidation:     c.SkipCredsValidation,
-		SkipMetadataApiCheck:    c.SkipMetadataApiCheck,
-		SkipRequestingAccountId: c.SkipRequestingAccountId,
-		StsEndpoint:             c.Endpoints["sts"],
-		Token:                   c.Token,
-		// UserAgentProducts: []*awsbase.UserAgentProduct{
-		// 	{Name: "APN", Version: "1.0"},
-		// 	{Name: "HashiCorp", Version: "1.0"},
-		// 	{Name: "Terraform", Version: c.terraformVersion,
-		// 		Extra: []string{"+https://www.terraform.io"}},
-		// },
-	}
-
-	sess, accountID, partition, err := awsbase.GetSessionWithAccountIDAndPartition(awsbaseConfig)
+	sess, accountID, partition, err := awsbase.GetSessionWithAccountIDAndPartition(c)
 	if err != nil {
 		return nil, fmt.Errorf("error configuring Terraform AWS Provider: %w", err)
-	}
-
-	fmt.Errorf("Account ID %s", accountID)
-
-	if accountID == "" {
-		log.Printf("[WARN] AWS account ID not found for provider. See https://www.terraform.io/docs/providers/aws/index.html#skip_requesting_account_id for implications.")
-	}
-
-	if err := awsbase.ValidateAccountID(accountID, c.AllowedAccountIds, c.ForbiddenAccountIds); err != nil {
-		return nil, err
 	}
 
 	dnsSuffix := "amazonaws.com"
@@ -220,6 +186,7 @@ func (c *Config) Client() (interface{}, error) {
 	}
 
 	client := &AWSClient{
+		appname:                c.AppName,
 		apigatewayconn:         apigateway.New(sess.Copy(&aws.Config{Endpoint: aws.String(c.Endpoints["apigateway"])})),
 		apigatewayv2conn:       apigatewayv2.New(sess.Copy(&aws.Config{Endpoint: aws.String(c.Endpoints["apigateway"])})),
 		athenaconn:             athena.New(sess.Copy(&aws.Config{Endpoint: aws.String(c.Endpoints["athena"])})),
@@ -253,46 +220,186 @@ func (c *Config) Client() (interface{}, error) {
 		xrayconn:               xray.New(sess.Copy(&aws.Config{Endpoint: aws.String(c.Endpoints["xray"])})),
 	}
 
-	// "Global" services that require customizations
-	globalAcceleratorConfig := &aws.Config{
-		Endpoint: aws.String(c.Endpoints["globalaccelerator"]),
-	}
-	route53Config := &aws.Config{
-		Endpoint: aws.String(c.Endpoints["route53"]),
-	}
-	shieldConfig := &aws.Config{
-		Endpoint: aws.String(c.Endpoints["shield"]),
-	}
-
 	// Services that require multiple client configurations
 	s3Config := &aws.Config{
 		Endpoint:         aws.String(c.Endpoints["s3"]),
 		S3ForcePathStyle: aws.Bool(c.S3ForcePathStyle),
 	}
-
 	client.s3conn = s3.New(sess.Copy(s3Config))
-
 	s3Config.DisableRestProtocolURICleaning = aws.Bool(true)
 	client.s3connUriCleaningDisabled = s3.New(sess.Copy(s3Config))
 
-	// Force "global" services to correct regions
-	switch partition {
-	case endpoints.AwsPartitionID:
-		globalAcceleratorConfig.Region = aws.String(endpoints.UsWest2RegionID)
-		route53Config.Region = aws.String(endpoints.UsEast1RegionID)
-		shieldConfig.Region = aws.String(endpoints.UsEast1RegionID)
-	case endpoints.AwsCnPartitionID:
-		// The AWS Go SDK is missing endpoint information for Route 53 in the AWS China partition.
-		// This can likely be removed in the future.
-		if aws.StringValue(route53Config.Endpoint) == "" {
-			route53Config.Endpoint = aws.String("https://api.route53.cn")
-		}
-		route53Config.Region = aws.String(endpoints.CnNorthwest1RegionID)
-	case endpoints.AwsUsGovPartitionID:
-		route53Config.Region = aws.String(endpoints.UsGovWest1RegionID)
+	return client, nil
+}
+
+// GetSession attempts to return valid AWS Go SDK session.
+func GetSession(c *Config) (*session.Session, error) {
+	options, err := GetSessionOptions(c)
+
+	if err != nil {
+		return nil, err
 	}
 
-	client.r53conn = route53.New(sess.Copy(route53Config))
+	sess, err := session.NewSessionWithOptions(*options)
+	if err != nil {
+		return nil, fmt.Errorf("Error creating AWS session: %w", err)
+	}
 
-	return client, nil
+	if c.MaxRetries > 0 {
+		sess = sess.Copy(&aws.Config{MaxRetries: aws.Int(c.MaxRetries)})
+	}
+
+	if !c.SkipCredsValidation {
+		if _, _, err := GetAccountIDAndPartitionFromSTSGetCallerIdentity(sts.New(sess)); err != nil {
+			return nil, fmt.Errorf("error validating provider credentials: %w", err)
+		}
+	}
+
+	return sess, nil
+}
+
+func GetSessionOptions(c *Config) (*session.Options, error) {
+	options := &session.Options{
+		Config: aws.Config{
+			EndpointResolver: c.EndpointResolver(),
+			HTTPClient:       cleanhttp.DefaultClient(),
+			MaxRetries:       aws.Int(0),
+			Region:           aws.String(c.Region),
+		},
+		Profile:           c.Profile,
+		SharedConfigState: session.SharedConfigEnable,
+	}
+
+	// get and validate credentials
+	creds, err := GetCredentials(c)
+	if err != nil {
+		return nil, err
+	}
+
+	// add the validated credentials to the session options
+	options.Config.Credentials = creds
+
+	if c.Insecure {
+		transport := options.Config.HTTPClient.Transport.(*http.Transport)
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
+	return options, nil
+}
+
+func GetCredentials(c *Config) (*awsCredentials.Credentials, error) {
+	sharedCredentialsFilename, err := homedir.Expand(c.CredsFilename)
+
+	if err != nil {
+		return nil, fmt.Errorf("error expanding shared credentials filename: %w", err)
+	}
+
+	// build a chain provider, lazy-evaluated by aws-sdk
+	providers := []awsCredentials.Provider{
+		&awsCredentials.StaticProvider{Value: awsCredentials.Value{
+			AccessKeyID:     c.AccessKey,
+			SecretAccessKey: c.SecretKey,
+			SessionToken:    c.Token,
+		}},
+		&awsCredentials.EnvProvider{},
+		&awsCredentials.SharedCredentialsProvider{
+			Filename: sharedCredentialsFilename,
+			Profile:  c.Profile,
+		},
+	}
+
+	// Validate the credentials before returning them
+	creds := awsCredentials.NewChainCredentials(providers)
+	cp, err := creds.Get()
+	if err != nil {
+		return nil, fmt.Errorf("Error loading credentials for AWS Provider: %w", err)
+	} else {
+		log.Printf("[INFO] AWS Auth provider used: %q", cp.ProviderName)
+	}
+
+	// This is the "normal" flow (i.e. not assuming a role)
+	if c.AssumeRoleARN == "" {
+		return creds, nil
+	}
+
+	// Otherwise we need to construct an STS client with the main credentials, and verify
+	// that we can assume the defined role.
+	log.Printf("[INFO] Attempting to AssumeRole %s (SessionName: %q, ExternalId: %q)",
+		c.AssumeRoleARN, c.AssumeRoleSessionName, c.AssumeRoleExternalID)
+
+	awsConfig := &aws.Config{
+		Credentials:      creds,
+		EndpointResolver: c.EndpointResolver(),
+		Region:           aws.String(c.Region),
+		MaxRetries:       aws.Int(c.MaxRetries),
+		HTTPClient:       cleanhttp.DefaultClient(),
+	}
+
+	assumeRoleSession, err := session.NewSession(awsConfig)
+
+	if err != nil {
+		return nil, fmt.Errorf("error creating assume role session: %w", err)
+	}
+
+	stsclient := sts.New(assumeRoleSession)
+	assumeRoleProvider := &stscreds.AssumeRoleProvider{
+		Client:  stsclient,
+		RoleARN: c.AssumeRoleARN,
+	}
+
+	if c.AssumeRoleDurationSeconds > 0 {
+		assumeRoleProvider.Duration = time.Duration(c.AssumeRoleDurationSeconds) * time.Second
+	}
+
+	if c.AssumeRoleExternalID != "" {
+		assumeRoleProvider.ExternalID = aws.String(c.AssumeRoleExternalID)
+	}
+
+	if c.AssumeRolePolicy != "" {
+		assumeRoleProvider.Policy = aws.String(c.AssumeRolePolicy)
+	}
+
+	if len(c.AssumeRolePolicyARNs) > 0 {
+		var policyDescriptorTypes []*sts.PolicyDescriptorType
+
+		for _, policyARN := range c.AssumeRolePolicyARNs {
+			policyDescriptorType := &sts.PolicyDescriptorType{
+				Arn: aws.String(policyARN),
+			}
+			policyDescriptorTypes = append(policyDescriptorTypes, policyDescriptorType)
+		}
+
+		assumeRoleProvider.PolicyArns = policyDescriptorTypes
+	}
+
+	if c.AssumeRoleSessionName != "" {
+		assumeRoleProvider.RoleSessionName = c.AssumeRoleSessionName
+	}
+
+	if len(c.AssumeRoleTags) > 0 {
+		var tags []*sts.Tag
+
+		for k, v := range c.AssumeRoleTags {
+			tag := &sts.Tag{
+				Key:   aws.String(k),
+				Value: aws.String(v),
+			}
+			tags = append(tags, tag)
+		}
+
+		assumeRoleProvider.Tags = tags
+	}
+
+	if len(c.AssumeRoleTransitiveTagKeys) > 0 {
+		assumeRoleProvider.TransitiveTagKeys = aws.StringSlice(c.AssumeRoleTransitiveTagKeys)
+	}
+
+	providers = []awsCredentials.Provider{assumeRoleProvider}
+
+	assumeRoleCreds := awsCredentials.NewChainCredentials(providers)
+	_, err = assumeRoleCreds.Get()
+
+	return assumeRoleCreds, nil
 }

@@ -487,7 +487,9 @@ func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, m inter
 		d.Set("datastore_trigger_enabled", false)
 	}
 
+	registryPut(m.(*AWSClient).appname)
 	return resourceFunctionRead(ctx, d, m)
+
 }
 
 func resourceFunctionRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {

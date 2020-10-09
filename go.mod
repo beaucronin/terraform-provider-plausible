@@ -5,6 +5,7 @@ go 1.14
 require (
 	github.com/aws/aws-sdk-go v1.34.13
 	github.com/hashicorp/aws-sdk-go-base v0.6.0
+	github.com/hashicorp/go-cleanhttp v0.5.1
 	github.com/hashicorp/terraform v0.11.9-beta1
 	github.com/hashicorp/terraform-plugin-sdk v1.15.0
 	github.com/hashicorp/terraform-plugin-sdk/v2 v2.0.1
