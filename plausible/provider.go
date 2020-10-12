@@ -52,13 +52,11 @@ func Provider() *schema.Provider {
 }
 
 func providerConfigure(d *schema.ResourceData, terraformVersion string) (interface{}, error) {
-	config := Config{
-		Region:           d.Get("region").(string),
+	config := AWSConfig{
 		AppName:          d.Get("app_name").(string),
+		Region:           d.Get("region").(string),
 		terraformVersion: terraformVersion,
 		CallerName:       "Plausible|AWS Provider",
-		DebugLogging:     true, //logging.IsDebugOrHigher(),
-
 	}
 
 	return config.Client()
